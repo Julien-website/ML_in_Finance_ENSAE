@@ -3,119 +3,135 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import io
-import re
 import zipfile
-import requests
 import pandas as pd
 
 
 @dataclass(frozen=True)
-class FrenchPaths:
-    root: Path = Path("data")
-    raw: Path = Path("data/raw")
-    processed: Path = Path("data/processed")
+class DataPaths:
+    raw_dir: Path = Path("data/raw")
 
 
-# URLs "ftp" les plus standards pour ces datasets
-FF25_ZIP_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/25_Portfolios_5x5_CSV.zip"
-FF3_ZIP_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_CSV.zip"
+FF25_ZIP = "25_Portfolios_5x5_CSV.zip"
+FF3_ZIP = "F-F_Research_Data_Factors_CSV.zip"
 
 
-def _download(url: str, dest: Path, timeout: int = 60) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and dest.stat().st_size > 0:
-        return dest  # cache local
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    dest.write_bytes(r.content)
-    return dest
+def _read_first_csv_from_zip(zip_path: Path) -> list[str]:
+    """Return file lines (decoded) from the first .csv found in the zip."""
+    if not zip_path.exists():
+        raise FileNotFoundError(f"Missing file: {zip_path}")
 
-
-def _read_french_csv_from_zip(zip_path: Path) -> str:
-    """Retourne le contenu texte du premier fichier .csv dans le zip."""
     with zipfile.ZipFile(zip_path, "r") as zf:
         csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
         if not csv_names:
-            raise ValueError(f"Aucun CSV trouvé dans {zip_path.name}. Contenu: {zf.namelist()}")
-        # généralement le 1er est celui qu'on veut
+            raise ValueError(f"No CSV found in {zip_path.name}. Contains: {zf.namelist()}")
         with zf.open(csv_names[0]) as f:
-            return f.read().decode("latin1", errors="replace")
+            # latin1 is usually safe for French files
+            text = f.read().decode("latin1", errors="replace")
+    return text.splitlines()
 
 
-def _parse_french_monthly_table(text: str) -> pd.DataFrame:
+def _parse_monthly_table(lines: list[str]) -> pd.DataFrame:
     """
-    Parse une table mensuelle Fama-French typique (lignes YYYYMM puis colonnes numériques),
-    en s'arrêtant quand les lignes ne ressemblent plus à des observations.
+    Parse the first monthly table in a French CSV (often contains metadata + multiple tables).
+    We locate the first line that looks like data (YYYYMM,...) and use the closest header above it.
     """
-    lines = text.splitlines()
+    cleaned = [ln.strip() for ln in lines if ln.strip()]
+    header = None
+    rows: list[list[str]] = []
 
-    # 1) on trouve la première ligne qui commence par "Date" ou un YYYYMM
-    start_idx = None
-    for i, line in enumerate(lines):
-        if line.strip().startswith("Date"):
-            start_idx = i
-            break
-        if re.match(r"^\s*\d{6}\s*,", line):
-            start_idx = i - 1  # on suppose que la ligne header est juste avant
-            break
-    if start_idx is None:
-        raise ValueError("Impossible de trouver le début de table (Date / YYYYMM).")
+    def is_yyyymm_row(s: str) -> bool:
+        # data rows start with YYYYMM then comma
+        if "," not in s:
+            return False
+        first = s.split(",")[0].strip()
+        return first.isdigit() and len(first) == 6
 
-    # 2) on reconstruit un pseudo-csv à partir de là et on lit
-    chunk = "\n".join(lines[start_idx:])
+    for i, line in enumerate(cleaned):
+        if header is None:
+            # Try direct header detection
+            norm = line.replace(" ", "").lower()
+            if norm.startswith("date,"):
+                header = [h.strip() for h in line.split(",")]
+                continue
 
-    df = pd.read_csv(io.StringIO(chunk))
+            # Otherwise, if this line looks like data (YYYYMM,...), infer header from previous line
+            if is_yyyymm_row(line):
+                if i == 0:
+                    raise ValueError("Found data row at top of file; cannot infer header.")
+                header = [h.strip() for h in cleaned[i - 1].split(",")]
+                # Now treat this line as first data row (fall through below)
+            else:
+                continue
 
-    # 3) on garde uniquement les lignes où la première colonne est YYYYMM
-    date_col = df.columns[0]
-    mask = df[date_col].astype(str).str.match(r"^\d{6}$")
-    df = df.loc[mask].copy()
+        # Once we have a header, collect data rows until table ends
+        parts = [p.strip() for p in line.split(",")]
 
-    # 4) date au format Period (mensuel)
-    df[date_col] = pd.to_datetime(df[date_col].astype(str), format="%Y%m")
-    df = df.set_index(date_col).sort_index()
+        if len(parts) != len(header):
+            break  # end of table
 
-    # 5) valeurs: souvent en % -> on convertit en décimal
+        if not is_yyyymm_row(line):
+            break  # end of table (non YYYYMM)
+
+        rows.append(parts)
+
+    if header is None or not rows:
+        # helpful debug: show first lines
+        preview = "\n".join(cleaned[:30])
+        raise ValueError(
+            "Could not locate a monthly table. First lines preview:\n" + preview
+        )
+
+    df = pd.DataFrame(rows, columns=header)
+
+    # First column is date (whatever its name)
+    df = df.rename(columns={df.columns[0]: "Date"})
+    df["Date"] = pd.to_datetime(df["Date"], format="%Y%m")
+    df = df.set_index("Date").sort_index()
+
+    # Convert values to numeric
     for c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Replace common sentinels
+    sentinels = [-99.99, -999.0, 99.99, 999.0, -9999.0, 9999.0]
+    df = df.replace(sentinels, pd.NA)
+
+    # Percent -> decimal
     df = df / 100.0
 
+    # Safety: drop duplicate dates
     df = df[~df.index.duplicated(keep="first")].sort_index()
 
     return df
 
 
-def load_ff25_and_rf(paths: FrenchPaths = FrenchPaths()) -> tuple[pd.DataFrame, pd.Series]:
+def load_ff25_and_rf(paths: DataPaths = DataPaths()) -> tuple[pd.DataFrame, pd.Series]:
     """
-    Retourne:
-    - ff25_excess: DataFrame (T x 25) d'excess returns des 25 portefeuilles
-    - rf: Series (T,) risk-free mensuel (en décimal)
+    Returns:
+      ff25_excess: (T x 25) excess returns of the 25 size-B/M portfolios (decimal, monthly)
+      rf:          (T,) risk-free rate (decimal, monthly)
     """
-    # Téléchargement
-    ff25_zip = _download(FF25_ZIP_URL, paths.raw / "25_Portfolios_5x5_CSV.zip")
-    ff3_zip = _download(FF3_ZIP_URL, paths.raw / "F-F_Research_Data_Factors_CSV.zip")
+    ff25_zip_path = paths.raw_dir / FF25_ZIP
+    ff3_zip_path = paths.raw_dir / FF3_ZIP
 
-    # Lecture + parsing
-    ff25_text = _read_french_csv_from_zip(ff25_zip)
-    ff3_text = _read_french_csv_from_zip(ff3_zip)
+    ff25_lines = _read_first_csv_from_zip(ff25_zip_path)
+    ff3_lines = _read_first_csv_from_zip(ff3_zip_path)
 
-    ff25 = _parse_french_monthly_table(ff25_text)
-    ff3 = _parse_french_monthly_table(ff3_text)
+    ff25 = _parse_monthly_table(ff25_lines)
+    ff3 = _parse_monthly_table(ff3_lines)
 
-    # RF est une colonne du fichier FF3
+    # RF column check
     if "RF" not in ff3.columns:
-        raise ValueError(f"Colonne RF introuvable dans FF3. Colonnes: {list(ff3.columns)}")
+        raise ValueError(f"RF column not found. Columns are: {list(ff3.columns)}")
 
-    rf = ff3["RF"].rename("RF")
+    rf = ff3["RF"].copy()
+    rf.name = "RF"
 
-    rf = rf[~rf.index.duplicated(keep="first")].sort_index()
-    ff25 = ff25[~ff25.index.duplicated(keep="first")].sort_index()
-
-    # Alignement des dates
-    common_idx = ff25.index.intersection(rf.index)
-    ff25 = ff25.loc[common_idx]
-    rf = rf.loc[common_idx]
+    # Align by common dates
+    common = ff25.index.intersection(rf.index)
+    ff25 = ff25.loc[common]
+    rf = rf.loc[common]
 
     # Excess returns
     ff25_excess = ff25.sub(rf, axis=0)
