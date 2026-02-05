@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ml_in_finance_ensae"
+version = "0.1.0"
+description = "Course project ENSAE - ML in Finance"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+where = ["src"]
