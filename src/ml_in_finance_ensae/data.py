@@ -1,11 +1,9 @@
 # src/ml_in_finance_ensae/data.py
 from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 import zipfile
 import pandas as pd
-
 
 @dataclass(frozen=True)
 class DataPaths:
@@ -137,3 +135,44 @@ def load_ff25_and_rf(paths: DataPaths = DataPaths()) -> tuple[pd.DataFrame, pd.S
     ff25_excess = ff25.sub(rf, axis=0)
 
     return ff25_excess, rf
+
+FF3_ZIP = "F-F_Research_Data_Factors_CSV.zip"
+
+def load_ff3_factors(paths: "DataPaths" = None) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Load monthly Fama-French 3 factors (Mkt-RF, SMB, HML) and RF from local ZIP.
+    Returns:
+      factors: DataFrame with columns ["Mkt-RF", "SMB", "HML"] in decimals
+      rf: Series in decimals
+    Assumes helpers exist:
+      - _read_first_csv_from_zip(zip_path) -> list[str]
+      - _parse_monthly_table(lines) -> pd.DataFrame (with dates index)
+    """
+    if paths is None:
+        paths = DataPaths()
+
+    zip_path = Path(paths.raw_dir) / FF3_ZIP
+    if not zip_path.exists():
+        raise FileNotFoundError(f"FF3 zip not found: {zip_path}")
+
+    lines = _read_first_csv_from_zip(zip_path)
+    df = _parse_monthly_table(lines)
+
+    # Defensive cleanup: strip column names (French files sometimes have spaces)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    required = {"Mkt-RF", "SMB", "HML", "RF"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns in FF3 table: {missing}. Got: {list(df.columns)}")
+
+    factors = df[["Mkt-RF", "SMB", "HML"]].copy()
+    rf = df["RF"].copy()
+    rf.name = "RF"
+
+    # Basic sanity checks (optional but helpful)
+    if factors.isna().any().any() or rf.isna().any():
+        # Not fatal; but usually indicates parsing boundary issues
+        pass
+
+    return factors, rf
