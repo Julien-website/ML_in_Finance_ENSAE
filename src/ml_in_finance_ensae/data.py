@@ -223,4 +223,59 @@ def to_excess(returns: pd.DataFrame, rf: pd.Series) -> pd.DataFrame:
     """
     idx = returns.index.intersection(rf.index)
     return returns.loc[idx].sub(rf.loc[idx], axis=0)
-    
+
+def load_all_test_assets_excess(paths: "DataPaths" = None) -> pd.DataFrame:
+    """
+    Load and concatenate monthly excess returns for:
+      - FF25 (Size x BM 5x5) excess
+      - 49 Industry portfolios excess
+      - 10 Momentum portfolios excess
+
+    Returns:
+      R_excess: DataFrame T×N (N=84) with prefixed, unique column names.
+    """
+    if paths is None:
+        paths = DataPaths()
+
+    # FF25 excess + rf
+    ff25_excess, rf1 = load_ff25_and_rf(paths)
+
+    # Factors + rf (should match rf1; we use this rf for other datasets)
+    _, rf2 = load_ff3_factors(paths)
+
+    # Use the intersection RF to be safe
+    rf = rf1.copy()
+    rf = rf.loc[rf.index.intersection(rf2.index)]
+
+    # Other returns (not excess)
+    ind49 = load_industry49(paths)
+    mom10 = load_mom10(paths)
+
+    # Convert to excess
+    ind49_ex = to_excess(ind49, rf)
+    mom10_ex = to_excess(mom10, rf)
+
+    # Align all on common dates
+    idx = ff25_excess.index.intersection(ind49_ex.index).intersection(mom10_ex.index)
+    ff25_excess = ff25_excess.loc[idx]
+    ind49_ex = ind49_ex.loc[idx]
+    mom10_ex = mom10_ex.loc[idx]
+
+    # Prefix columns to avoid any name collisions and make provenance obvious
+    ff25_excess = ff25_excess.copy()
+    ff25_excess.columns = [f"FF25_{c}" for c in ff25_excess.columns]
+
+    ind49_ex = ind49_ex.copy()
+    ind49_ex.columns = [f"IND_{c}" for c in ind49_ex.columns]
+
+    mom10_ex = mom10_ex.copy()
+    mom10_ex.columns = [f"MOM_{c}" for c in mom10_ex.columns]
+
+    R_excess = pd.concat([ff25_excess, ind49_ex, mom10_ex], axis=1)
+
+    # Final sanity: no duplicate columns
+    if R_excess.columns.duplicated().any():
+        dups = R_excess.columns[R_excess.columns.duplicated()].tolist()
+        raise ValueError(f"Duplicate columns after concat: {dups}")
+
+    return R_excess
