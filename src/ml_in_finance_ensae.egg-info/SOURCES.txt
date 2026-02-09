@@ -1,6 +1,10 @@
 README.md
 pyproject.toml
 src/ml_in_finance_ensae/__init__.py
+src/ml_in_finance_ensae/bench_ff3.py
+src/ml_in_finance_ensae/data.py
+src/ml_in_finance_ensae/minimax_game.py
+src/ml_in_finance_ensae/sdf_linear.py
 src/ml_in_finance_ensae/utils.py
 src/ml_in_finance_ensae.egg-info/PKG-INFO
 src/ml_in_finance_ensae.egg-info/SOURCES.txt
