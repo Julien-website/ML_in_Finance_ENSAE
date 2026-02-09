@@ -176,3 +176,51 @@ def load_ff3_factors(paths: "DataPaths" = None) -> tuple[pd.DataFrame, pd.Series
         pass
 
     return factors, rf
+
+
+IND49_ZIP = "49_Industry_Portfolios_CSV.zip"
+MOM10_ZIP = "10_Portfolios_Prior_12_2_CSV.zip"
+
+
+def load_industry49(paths: "DataPaths" = None) -> pd.DataFrame:
+    """
+    Load 49 Industry Portfolios (monthly returns) from local ZIP.
+    Returns DataFrame in decimals (not excess).
+    """
+    if paths is None:
+        paths = DataPaths()
+    zip_path = Path(paths.raw_dir) / IND49_ZIP
+    if not zip_path.exists():
+        raise FileNotFoundError(f"Industry49 zip not found: {zip_path}")
+
+    lines = _read_first_csv_from_zip(zip_path)
+    df = _parse_monthly_table(lines)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def load_mom10(paths: "DataPaths" = None) -> pd.DataFrame:
+    """
+    Load 10 Momentum Portfolios (monthly returns) from local ZIP.
+    Returns DataFrame in decimals (not excess).
+    """
+    if paths is None:
+        paths = DataPaths()
+    zip_path = Path(paths.raw_dir) / MOM10_ZIP
+    if not zip_path.exists():
+        raise FileNotFoundError(f"Mom10 zip not found: {zip_path}")
+
+    lines = _read_first_csv_from_zip(zip_path)
+    df = _parse_monthly_table(lines)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def to_excess(returns: pd.DataFrame, rf: pd.Series) -> pd.DataFrame:
+    """
+    Convert returns (T×N) to excess returns by subtracting rf.
+    Assumes both are decimals and aligned on dates (intersection used).
+    """
+    idx = returns.index.intersection(rf.index)
+    return returns.loc[idx].sub(rf.loc[idx], axis=0)
+    
