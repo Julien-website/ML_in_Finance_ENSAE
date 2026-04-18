@@ -13,30 +13,30 @@ def calculate_sharpe_ratio(portfolio_returns, annualization_factor=np.sqrt(12)):
 
 def calculate_r2_scores(realized_returns, predicted_returns):
     """
-    Calcule deux types de R² mentionnés dans l'article :
-    1. Total R² : Mesure la variance totale expliquée.
-    2. Predictive R² (Cross-sectional) : Mesure la capacité à classer les actifs.
+    realized_returns: np.array 1D (all stocks * all months)
+    predicted_returns: np.array 1D (all stocks * all months)
     """
-    # R² Total (immédiat)
-    res_total = np.sum((realized_returns - predicted_returns)**2)
-    tot_total = np.sum(realized_returns**2) # Comparaison au modèle zéro (sans risque)
-    r2_total = 1 - (res_total / tot_total)
+    # 1. TOTAL R2 (Global)
+    # Dans l'article, on compare à la prédiction 0 (pas de rendement moyen)
+    numerator = np.sum((realized_returns - predicted_returns)**2)
+    denominator = np.sum(realized_returns**2)
     
-    # R² Cross-sectional (moyenne par actif sur la période)
-    # On agrège par actif (axis 0 dans la matrice T x N)
-    mu_realized = np.mean(realized_returns, axis=0)
-    mu_predicted = np.mean(predicted_returns, axis=0)
+    r2_total = 1 - (numerator / denominator)
+
+    # 2. CROSS-SECTIONAL R2 (XS)
+    # L'article l'évalue souvent sur les rendements moyens par actif
+    # Problème : avec np.concatenate, on a perdu l'index des actifs.
+    # Pour un vrai XS R2, il faudrait la corrélation ou l'erreur sur les moyennes.
     
-    res_xs = np.sum((mu_realized - mu_predicted)**2)
-    tot_xs = np.sum((mu_realized - np.mean(mu_realized))**2)
-    r2_xs = 1 - (res_xs / tot_xs)
+    # Approche simplifiée (Corrélation de Spearman / Classement)
+    # L'article valorise la capacité à ordonner les actifs.
+    from scipy.stats import spearmanr
+    corr_xs, _ = spearmanr(realized_returns, predicted_returns)
     
-    return r2_total, r2_xs
+    return r2_total, corr_xs
+
 
 def evaluate_performance(trainer, dataloader, device):
-    """
-    Fonction maîtresse qui parcourt le dataset et calcule toutes les métriques.
-    """
     trainer.sdf_net.eval()
     trainer.lstm_net.eval()
     
@@ -48,35 +48,51 @@ def evaluate_performance(trainer, dataloader, device):
         for char, macro, ret in dataloader:
             char, macro, ret = char.to(device), macro.to(device), ret.to(device)
             
-            # 1. Extraction des poids du SDF (omega)
+            # Nettoyage des dimensions [1, N, C] -> [N, C]
+            char = char.squeeze(0)
+            ret = ret.squeeze(0)
+            
+            # 1. Forward pass
             h_t = trainer.lstm_net(macro)
-            omega = trainer.sdf_net(char, h_t) # (N, 1)
+            omega = trainer.sdf_net(char, h_t) # Shape [N, 1]
             
-            # 2. Rendement du portefeuille SDF (poids * rendements réalisés)
-            # R_sdf = sum(omega_i * R_i)
-            r_sdf_t = torch.sum(omega * ret).item()
+            # 2. Calcul du rendement du SDF pour ce mois t
+            # On s'assure que ret et omega ont la même forme pour la multiplication
+            r_sdf_t = torch.sum(omega.view(-1) * ret.view(-1)).item()
+            
+            # 3. APPEND (Le remplissage des listes)
             sdf_returns.append(r_sdf_t)
-            
-            # Stockage pour R² (on repasse en CPU/Numpy)
             all_omega.append(omega.cpu().numpy().flatten())
             all_returns.append(ret.cpu().numpy().flatten())
 
-    # Conversion en matrices (T, N)
-    all_omega = np.array(all_omega)
-    all_returns = np.array(all_returns)
+    # --- CALCULS APRÈS LA BOUCLE ---
     
-    # Calcul des métriques
-    sharpe = calculate_sharpe_ratio(sdf_returns)
-    r2_total, r2_xs = calculate_r2_scores(all_returns, all_omega) # omega est ici le proxy de E[R]
+    # Conversion et concaténation (pour gérer les N qui varient chaque mois)
+    all_omega_flat = np.concatenate(all_omega)
+    all_returns_flat = np.concatenate(all_returns)
+    sdf_returns = np.array(sdf_returns)
+
+    # Nettoyage final contre les NaNs résiduels dans les données
+    mask = np.isfinite(sdf_returns)
+    sdf_returns = sdf_returns[mask]
+
+    if len(sdf_returns) < 2:
+        return {"Sharpe_Ratio": 0, "R2_Total": 0}
+
+    # Calcul du Sharpe
+    mu = np.mean(sdf_returns)
+    sigma = np.std(sdf_returns)
+    sharpe = (mu / sigma) * np.sqrt(12) if sigma > 1e-9 else 0
     
-    metrics = {
+    # Calcul des R2 (avec vos fonctions)
+    r2_total, r2_xs = calculate_r2_scores(all_returns_flat, all_omega_flat)
+    
+    return {
         "Sharpe_Ratio": sharpe,
         "R2_Total": r2_total,
         "R2_CrossSectional": r2_xs,
-        "SDF_Volatility": np.std(sdf_returns) * np.sqrt(12)
+        "SDF_Volatility": sigma * np.sqrt(12)
     }
-    
-    return metrics
 
 
 def plot_characteristic_importance(trainer, char_data, macro_history, char_names):
@@ -97,3 +113,40 @@ def plot_characteristic_importance(trainer, char_data, macro_history, char_names
     # Création du graphique
     feat_imp = pd.Series(importance, index=char_names).sort_values(ascending=False)
     feat_imp.head(10).plot(kind='barh', title="Top 10 Characteristics Importance")
+
+
+def evaluate_performance_ensemble(trainer, dataloader, device):
+    """
+    Évalue la performance en utilisant la moyenne de l'ensemble.
+    """
+    all_omega = []
+    all_returns = []
+    sdf_returns_list = []
+
+    with torch.no_grad():
+        for char, macro, ret in dataloader:
+            char, macro, ret = char.to(device), macro.to(device), ret.to(device)
+            
+            # 1. Prédiction par consensus
+            omega = trainer.predict_ensemble_weights(char, macro) # (N, 1)
+            
+            # 2. Rendement du SDF
+            ret_flat = ret.squeeze(0)
+            r_sdf_t = torch.sum(omega * ret_flat).item()
+            
+            sdf_returns_list.append(r_sdf_t)
+            all_omega.append(omega.cpu().numpy())
+            all_returns.append(ret_flat.cpu().numpy())
+
+    # Calcul du Sharpe Global
+    sdf_returns_list = np.array(sdf_returns_list)
+    mu = np.mean(sdf_returns_list)
+    sigma = np.std(sdf_returns_list)
+    sharpe = (mu / sigma) * np.sqrt(12) if sigma > 1e-9 else 0
+    
+    return {
+        "Sharpe_Ratio": sharpe,
+        "all_omega": all_omega,
+        "all_returns": all_returns,
+        "sdf_returns_list": sdf_returns_list
+    }

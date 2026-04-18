@@ -279,3 +279,45 @@ def load_all_test_assets_excess(paths: "DataPaths" = None) -> pd.DataFrame:
         raise ValueError(f"Duplicate columns after concat: {dups}")
 
     return R_excess
+
+
+
+
+def load_macro_fred(filepath):
+    """
+    Charge FRED-MD en gérant la ligne 'Transform:' et les tcodes.
+    """
+    # 1. On charge tout le fichier
+    raw_df = pd.read_csv(filepath)
+
+    # 2. Extraction des tcodes (Ligne 0)
+    # On récupère la première ligne, on enlève la première colonne (qui contient 'Transform:')
+    # et on convertit le reste en entiers.
+    tcodes = raw_df.iloc[0, 1:].dropna().astype(int)
+    tcodes.index = tcodes.index.str.strip()
+
+    # 3. Extraction des données (Ligne 1 jusqu'à la fin)
+    df = raw_df.iloc[1:].copy()
+
+    # 4. Nettoyage de la colonne Date
+    # On identifie la colonne de date (souvent 'sasdate')
+    date_col = df.columns[0] 
+    
+    # On convertit en datetime. Les erreurs (si lignes de texte en bas du fichier) deviennent NaN.
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    
+    # On supprime les lignes où la date est invalide (indispensable !)
+    df = df.dropna(subset=[date_col])
+    
+    df.set_index(date_col, inplace=True)
+    df.index.name = 'Date'
+
+    # 5. Conversion numérique
+    # On s'assure que toutes les colonnes macro sont des flottants
+    df = df.apply(pd.to_numeric, errors='coerce')
+    df.columns = df.columns.str.strip()
+
+    # 6. Remplissage des trous (Forward fill)
+    df = df.ffill()
+
+    return df, tcodes
