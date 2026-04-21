@@ -255,30 +255,20 @@ def load_all_test_assets_excess(paths: "DataPaths" = None) -> pd.DataFrame:
     ind49_ex = to_excess(ind49, rf)
     mom10_ex = to_excess(mom10, rf)
 
-    # Align all on common dates
-    idx = ff25_excess.index.intersection(ind49_ex.index).intersection(mom10_ex.index)
-    ff25_excess = ff25_excess.loc[idx]
-    ind49_ex = ind49_ex.loc[idx]
-    mom10_ex = mom10_ex.loc[idx]
+    R_excess = pd.concat([
+        ff25_excess.add_prefix("FF25_"), 
+        ind49_ex.add_prefix("IND_"), 
+        mom10_ex.add_prefix("MOM_")
+    ], axis=1)
 
-    # Prefix columns to avoid any name collisions and make provenance obvious
-    ff25_excess = ff25_excess.copy()
-    ff25_excess.columns = [f"FF25_{c}" for c in ff25_excess.columns]
-
-    ind49_ex = ind49_ex.copy()
-    ind49_ex.columns = [f"IND_{c}" for c in ind49_ex.columns]
-
-    mom10_ex = mom10_ex.copy()
-    mom10_ex.columns = [f"MOM_{c}" for c in mom10_ex.columns]
-
-    R_excess = pd.concat([ff25_excess, ind49_ex, mom10_ex], axis=1)
-
+    R_excess = R_excess.sort_index()
     # Final sanity: no duplicate columns
     if R_excess.columns.duplicated().any():
         dups = R_excess.columns[R_excess.columns.duplicated()].tolist()
         raise ValueError(f"Duplicate columns after concat: {dups}")
 
     return R_excess
+    
 
 
 

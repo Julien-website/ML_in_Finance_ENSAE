@@ -3,59 +3,50 @@ from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
 
-import torch
-from torch.utils.data import Dataset
 
 class AssetPricingDataset(Dataset):
-    def __init__(self, returns, macro, lookback=12):
+    def __init__(self, df_ret, df_macro, df_char, lookback=12):
         """
         Args:
-            returns (pd.DataFrame): T x N (Excess returns des 84 portefeuilles)
-            macro (pd.DataFrame): T x M (Variables macro stationnaires)
-            lookback (int): Fenêtre temporelle pour le LSTM
+            df_ret: DataFrame des rendements (T, N)
+            df_macro: DataFrame des variables macro (T, M)
+            df_char: DataFrame ou Array des caractéristiques (T, N, K) 
+                     où K est le nombre de caractéristiques (Size, BM, etc.)
+            lookback: Fenêtre temporelle pour le LSTM
         """
-        # 1. Alignement des dates
-        common_dates = returns.index.intersection(macro.index)
-        self.returns_df = returns.loc[common_dates]
-        self.macro_df = macro.loc[common_dates]
-        
+        super().__init__()
         self.lookback = lookback
-        # On ne peut commencer qu'après avoir assez de recul pour le LSTM
-        self.dates = common_dates[lookback:] 
+    
+        # Rendements (Cibles)
+        self._y_targets = df_ret.values.astype(np.float32)
         
-        # 2. Matrice Identité (84 x 84)
-        # Puisque ce sont des portefeuilles, leurs "caractéristiques" sont 
-        # simplement leur identité (One-hot encoding)
-        self.n_assets = len(returns.columns)
-        self.identity = torch.eye(self.n_assets)
+        # Séries Macro (Input LSTM)
+        self._x_macro = df_macro.values.astype(np.float32)
+        
+        if isinstance(df_char, pd.DataFrame):
+            self._x_characteristics = df_char.values.astype(np.float32)
+        else:
+            self._x_characteristics = df_char.astype(np.float32)
+        
+        self.n_assets = self._y_targets.shape[1]
+        self._len = int(self._y_targets.shape[0])
 
     def __len__(self):
-        # On prédit t+1, donc on s'arrête à l'avant-dernière date disponible
-        return len(self.dates) - 1
+        return self._len
 
     def __getitem__(self, idx):
-        date_t = self.dates[idx]
-        date_t_plus_1 = self.dates[idx + 1]
+        x_seq = self._x_macro[idx : idx + self.lookback]
         
-        # 1. Macro (Fenêtre glissante) : t-lookback+1 jusqu'à t
-        macro_seq = self.macro_df.loc[:date_t].iloc[-self.lookback:]
-        macro_values = macro_seq.values.astype(np.float32)
-        macro_tensor = torch.tensor(macro_values, dtype=torch.float32)
+        # 2. Caractéristiques des actifs à l'instant t-1 (ou t selon ton décalage)
+        # On prend les caractéristiques qui conditionnent le poids du SDF
+        x_char = self._x_characteristics[idx] 
         
-        # 2. Caractéristiques (SDF Input)
-        # On renvoie toujours la même matrice identité car les actifs sont les mêmes
-        chars_tensor = self.identity
-
-        # 3. Rendements à t+1 (Target)
-        # On récupère les rendements des 84 actifs à la date suivante
-        returns_t_plus_1 = self.returns_df.loc[date_t_plus_1]
-        returns_values = returns_t_plus_1.values.astype(np.float32)
-        returns_tensor = torch.tensor(returns_values, dtype=torch.float32).unsqueeze(1)
+        # 3. Le rendement correspondant à l'instant t
+        y_val = self._y_targets[idx]
         
-        return chars_tensor, macro_tensor, returns_tensor
-
-    
-
+        return (torch.from_numpy(x_char), 
+                torch.from_numpy(x_seq), 
+                torch.from_numpy(y_val))
 
 def apply_stationarity_transforms(data: pd.DataFrame, tcodes: pd.Series) -> pd.DataFrame:
     """

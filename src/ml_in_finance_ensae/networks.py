@@ -74,19 +74,22 @@ class AdversarialNetwork(nn.Module):
         return self.network(combined_input)
     
 def compute_pricing_error(weights, returns, instruments):
-    """
-    weights: omega_i,t (N, 1) issus du SDFNet
-    returns: R^e_{i,t+1} (N, 1)
-    instruments: g_{i,t} (N, output_dim) issus de l'Adversaire
-    """
-    # M = 1 - sum(omega * R^e)
+    # weights: (78, 1), returns: (78, 1) -> scalaire
+    # On calcule le SDF M_{t+1}
     sdf = 1 - torch.sum(weights * returns)
     
-    # Condition de moment : E[M * R^e * g]
-    # On calcule l'erreur pour chaque instrument
-    errors = torch.mean(sdf * returns * instruments, dim=0)
+    # 1. Calcul de l'impact de prix par actif : (78, 1)
+    pricing_impact = sdf * returns 
     
-    # La perte est la somme des carrés des erreurs de prix
+    # 2. C'EST ICI QUE CA COINCE : 
+    # On force pricing_impact (78, 1) à devenir (78, 8) pour matcher les instruments
+    # .expand_as(instruments) duplique virtuellement la colonne 8 fois
+    moment_conditions = pricing_impact.expand_as(instruments) * instruments
+    
+    # 3. Moyenne sur les 78 actifs pour obtenir les 8 erreurs de prix (un par instrument)
+    errors = torch.mean(moment_conditions, dim=0)
+    
+    # 4. Loss = Somme des carrés
     return torch.sum(errors**2)
 
 class MacroLSTM(nn.Module):

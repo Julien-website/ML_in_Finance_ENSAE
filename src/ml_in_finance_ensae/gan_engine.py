@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import copy
+
 
 class GANTrainer:
     def __init__(self, sdf_net, adv_net, lstm_net, lr_sdf=1e-4, lr_adv=1e-3):
@@ -93,11 +95,6 @@ class GANTrainer:
         return weights # Simplification : les poids omega sont proportionnels à E[R]
     
 
-
-import torch
-import torch.nn as nn
-import copy
-
 class GANTrainerEnsemble:
     def __init__(self, sdf_net, adv_net, lstm_net, lr_sdf=1e-4, lr_adv=1e-3, n_models=5):
         """
@@ -123,13 +120,26 @@ class GANTrainerEnsemble:
             self.models.append(m)
 
     def pricing_error_loss(self, weights, returns, instruments):
-        # M = 1 - sum(w * R)
+        # 1. Calcul du SDF M = 1 - sum(w * R)
+        # weights: (N, 1), returns: (N, 1) -> scalaire
         sdf = 1.0 - torch.sum(weights * returns)
-        # Protection numérique : on bride le SDF pour éviter l'explosion
+        
+        # Protection numérique
         sdf = torch.clamp(sdf, min=-2, max=2) 
         
-        # E[M * R * g]
-        moments = torch.mean(sdf * returns * instruments, dim=0)
+        # 2. Calcul du rendement actualisé pour chaque actif (N, 1)
+        # On s'assure que 'returns' est bien une colonne pour le broadcasting
+        pricing_impact = sdf * returns.view(-1, 1) 
+        
+        # 3. Alignement pour les instruments (N, 8)
+        # pricing_impact (N, 1) est "étendu" virtuellement en (N, 8) 
+        # pour multiplier chaque instrument de chaque actif
+        moments_per_asset = pricing_impact.expand_as(instruments) * instruments
+        
+        # 4. Condition de moment : moyenne sur les N actifs -> vecteur de taille 8
+        moments = torch.mean(moments_per_asset, dim=0)
+        
+        # La perte est la somme des carrés des 8 erreurs de prix
         return torch.sum(moments**2)
 
     def train_step(self, char_data, macro_history, returns):
